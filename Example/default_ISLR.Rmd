@@ -1,0 +1,481 @@
+---
+title: "Ví dụ về các mô hình phân loại trong thống kê"
+subtitle: "Dataset: Default -- ISLR"
+author: "Trần Minh Châu"
+date: "`12/05/2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: paged
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 5,
+  fig.align  = "center"
+)
+```
+
+# 0. Thư viện
+
+```{r libraries}
+library(ISLR)        # bộ dữ liệu Default
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(patchwork)
+library(scales)
+library(corrplot)
+library(skimr)
+library(MASS)        # lda(), qda()
+library(class)       # knn()
+library(pROC)        # roc(), auc()
+library(broom)       # tidy() cho glm
+```
+
+------------------------------------------------------------------------
+
+# PHẦN 1 – KHÁM PHÁ DỮ LIỆU (EDA)
+
+------------------------------------------------------------------------
+
+# 1. Tổng quan dữ liệu
+
+## 1.1 Đọc & Cấu trúc dữ liệu
+
+```{r load-data}
+df <- Default
+
+# Xem cấu trúc
+glimpse(df)
+```
+
+```{r basic-info}
+cat("Số hàng:", nrow(df), "\n")
+cat("Số cột :", ncol(df), "\n\n")
+cat("Mô tả các biến:\n")
+cat("  - default : Factor 2 lớp (No / Yes) – biến target\n")
+cat("  - student : Factor 2 lớp (No / Yes) – có phải sinh viên không\n")
+cat("  - balance : Số dư trung bình tháng sau khi thanh toán tối thiểu (USD)\n")
+cat("  - income  : Thu nhập hàng năm của khách hàng (USD)\n")
+```
+
+## 1.2 Thống kê mô tả
+
+```{r skim}
+skim(df)
+```
+
+> 📊 Bộ dữ liệu `Default` có 10,000 quan sát, 2 biến định lượng
+> (`balance`, `income`) và 2 biến định tính (`default`, `student`).
+
+------------------------------------------------------------------------
+
+# 2. Biến Target (default)
+
+```{r target-analysis}
+target_summary <- df %>%
+  count(default) %>%
+  mutate(
+    label   = ifelse(default == "Yes", "Default (Vỡ nợ)", "Non-Default"),
+    pct     = n / sum(n),
+    pct_lab = percent(pct, accuracy = 0.1)
+  )
+
+default_pct <- target_summary %>%
+  filter(default == "Yes") %>%
+  pull(pct_lab)
+
+ggplot(target_summary, aes(x = 2, y = n, fill = label)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +
+  geom_text(
+    aes(label = paste0(pct_lab, "\n(", comma(n), " KH)")),
+    position = position_stack(vjust = 0.5),
+    size = 4, fontface = "bold", color = "white"
+  ) +
+  annotate("text", x = 0, y = 0,
+           label = paste0(default_pct, "\nDefault"),
+           size = 6, fontface = "bold") +
+  scale_fill_manual(values = c("Default (Vỡ nợ)" = "#ef4444",
+                               "Non-Default"      = "#10b981")) +
+  labs(
+    title    = "Phân bố biến Target – default",
+    subtitle = "Tỷ lệ khách hàng vỡ nợ trong bộ dữ liệu ISLR::Default",
+    fill     = NULL
+  ) +
+  theme_void() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "bottom"
+  )
+```
+
+> ⚠️ Class Imbalance: Tỷ lệ xấp xỉ 97/3 – mất cân bằng lớp rất cao.
+
+------------------------------------------------------------------------
+
+# 3. Phân phối biến định lượng
+
+## 3.1 Histogram – balance & income
+
+```{r hist-continuous}
+p1 <- ggplot(df, aes(x = balance)) +
+  geom_histogram(bins = 40, fill = "#3b82f6", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = median(df$balance), color = "#1d4ed8",
+             linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = mean(df$balance), color = "#ef4444",
+             linetype = "dashed", linewidth = 1) +
+  annotate("text", x = median(df$balance) + 250, y = 1000,
+           label = paste0("Median: ", comma(round(median(df$balance)))),
+           color = "#1d4ed8", size = 3.5, fontface = "bold") +
+  annotate("text", x = mean(df$balance) + 250, y = 900,
+           label = paste0("Mean: ", comma(round(mean(df$balance)))),
+           color = "#ef4444", size = 3.5, fontface = "bold") +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Phân phối Balance",
+       x = "Số dư tín dụng (USD)", y = "Số khách hàng") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+p2 <- ggplot(df, aes(x = income)) +
+  geom_histogram(bins = 40, fill = "#6366f1", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = median(df$income), color = "#4338ca",
+             linetype = "dashed", linewidth = 1) +
+  annotate("text", x = median(df$income) + 8000, y = 320,
+           label = paste0("Median: ", comma(round(median(df$income)))),
+           color = "#4338ca", size = 3.5, fontface = "bold") +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Phân phối Income",
+       x = "Thu nhập (USD)", y = "Số khách hàng") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+p1 + p2
+```
+
+> 📊 Balance phân phối lệch phải – phần lớn khách hàng có số dư thấp.
+> Income phân phối khá đối xứng, tập trung quanh mức trung vị
+> \~\$34,000/năm.
+
+## 3.2 Boxplot – balance & income theo nhóm Default
+
+```{r boxplot-by-default}
+df_lab <- df %>%
+  mutate(default_label = ifelse(default == "Yes", "Default", "Non-Default"))
+
+p3 <- ggplot(df_lab, aes(x = default_label, y = balance, fill = default_label)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.3, outlier.size = 0.8) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3,
+               fill = "white", color = "black") +
+  scale_fill_manual(values = c("Default" = "#ef4444", "Non-Default" = "#10b981")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Balance theo nhóm Default",
+       subtitle = "♦ = Giá trị mean",
+       x = NULL, y = "Balance (USD)", fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "none")
+
+p4 <- ggplot(df_lab, aes(x = default_label, y = income, fill = default_label)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.3, outlier.size = 0.8) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3,
+               fill = "white", color = "black") +
+  scale_fill_manual(values = c("Default" = "#ef4444", "Non-Default" = "#10b981")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Income theo nhóm Default",
+       subtitle = "♦ = Giá trị mean",
+       x = NULL, y = "Income (USD)", fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "none")
+
+p3 + p4
+```
+
+> **📌** Nhóm Default có balance trung vị cao hơn rõ rệt so với
+> Non-Default → `balance` là predictor quan trọng. Ngược lại, `income`
+> giữa hai nhóm không chênh lệch nhiều.
+
+------------------------------------------------------------------------
+
+# 4. Biến phân loại – student & Default
+
+```{r student-default}
+student_rate <- df %>%
+  group_by(student) %>%
+  summarise(
+    n    = n(),
+    rate = mean(default == "Yes"),
+    .groups = "drop"
+  ) %>%
+  mutate(label = ifelse(student == "Yes", "Sinh viên", "Không phải SV"),
+         pct   = percent(rate, 0.1))
+
+p_student <- ggplot(student_rate, aes(x = label, y = rate, fill = label)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = pct), vjust = -0.4, fontface = "bold", size = 4.5) +
+  scale_fill_manual(values = c("Sinh viên" = "#f59e0b",
+                               "Không phải SV" = "#3b82f6")) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.06)) +
+  labs(title = "Default Rate theo trạng thái Sinh viên",
+       x = NULL, y = "Default Rate") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+# Stacked bar
+p_stack <- df %>%
+  count(student, default) %>%
+  group_by(student) %>%
+  mutate(pct = n / sum(n),
+         student_label = ifelse(student == "Yes", "Sinh viên", "Không phải SV"),
+         default_label = ifelse(default == "Yes", "Default", "Non-Default")) %>%
+  ggplot(aes(x = student_label, y = pct, fill = default_label)) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = percent(pct, 0.1)),
+            position = position_stack(vjust = 0.5),
+            fontface = "bold", color = "white", size = 4) +
+  scale_fill_manual(values = c("Default" = "#ef4444", "Non-Default" = "#10b981")) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Tỷ lệ Default theo Sinh viên (Stacked)",
+       x = NULL, y = NULL, fill = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+
+p_student + p_stack
+```
+
+> **📌** Sinh viên có tỷ lệ default cao hơn (\~4.3% vs \~2.9%), tuy
+> nhiên sự chênh lệch không quá lớn. Biến `student` vẫn có thể mang
+> thông tin hữu ích khi kết hợp với `balance`.
+
+------------------------------------------------------------------------
+
+# 5. Scatter Plot – balance vs income
+
+```{r scatter-main}
+ggplot(df, aes(x = balance, y = income, color = default)) +
+  geom_point(alpha = 0.35, size = 0.9) +
+  scale_color_manual(
+    values = c("No" = "#10b981", "Yes" = "#ef4444"),
+    labels = c("Non-Default", "Default")
+  ) +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Scatter: Balance vs Income theo nhóm Default",
+    subtitle = "Đỏ = Default | Xanh = Non-Default",
+    x = "Balance (USD)", y = "Income (USD)", color = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold"),
+    legend.position = "top"
+  )
+```
+
+> **📌** Khách hàng vỡ nợ (đỏ) tập trung rõ rệt ở vùng balance cao. Biến
+> income không phân tách được hai nhóm, trong khi balance phân tách khá
+> tốt.
+
+```{r scatter-facet-student}
+ggplot(df, aes(x = balance, y = income, color = default)) +
+  geom_point(alpha = 0.4, size = 0.9) +
+  facet_wrap(~student, labeller = labeller(student = c("No" = "Không phải SV",
+                                                        "Yes" = "Sinh viên"))) +
+  scale_color_manual(
+    values = c("No" = "#10b981", "Yes" = "#ef4444"),
+    labels = c("Non-Default", "Default")
+  ) +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Balance vs Income – phân tách theo Student",
+    x = "Balance (USD)", y = "Income (USD)", color = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "top",
+        strip.text = element_text(face = "bold"))
+```
+
+------------------------------------------------------------------------
+
+# 6. Ma trận Tương quan
+
+```{r corr-matrix}
+library(dplyr)
+library(corrplot)
+
+# Encode factor thành số để tính correlation
+df_num <- df %>%
+  mutate(
+    default_n = as.integer(default == "Yes"),
+    student_n = as.integer(student == "Yes")
+  ) %>%
+  dplyr::select(default_n, student_n, balance, income)
+
+corr_mat <- cor(df_num, use = "complete.obs")
+
+rownames(corr_mat) <- colnames(corr_mat) <- c("default", "student", "balance", "income")
+
+corrplot(
+  corr_mat,
+  method = "color",
+  type = "upper",
+  addCoef.col = "black",
+  number.cex = 0.85,
+  tl.col = "black",
+  tl.srt = 45,
+  tl.cex = 0.9,
+  col = colorRampPalette(c("#3b82f6", "white", "#ef4444"))(200),
+  diag = FALSE,
+  title = "Heatmap Tương quan - Default Dataset",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+> 📌 Biến balance có tương quan dương rõ nhất với default
+> ($r \approx 0.35$), cho thấy khách hàng có số dư thẻ tín dụng cao hơn
+> thường có xu hướng vỡ nợ cao hơn. Trong khi đó, income có tương quan
+> âm rất nhẹ với default ($r \approx -0.02$), nên mối liên hệ tuyến tính
+> giữa thu nhập và khả năng vỡ nợ là không đáng kể.
+
+------------------------------------------------------------------------
+
+# PHẦN 2 – XÂY DỰNG MÔ HÌNH
+
+------------------------------------------------------------------------
+
+# Ví dụ 2.3. Logistic Regression
+
+```{r logistic-fit}
+glm.fit <- glm(
+  default ~ student + balance + income,
+  data = Default,
+  family = binomial)
+summary(glm.fit)
+```
+
+------------------------------------------------------------------------
+
+# Ví dụ 2.4. Linear Discriminant Analysis (LDA)
+
+```{r lda-fit}
+lda.fit <- lda(default ~ student + balance + income, data = Default)
+lda.fit
+```
+
+Sau khi ước lượng mô hình LDA, ta xét hai khách hàng mới đều không phải
+sinh viên,\
+có thu nhập bằng mức trung bình mẫu, nhưng có số dư thẻ tín dụng lần
+lượt là\
+1000 và 2000.
+
+```{r lda-predict}
+new_data <- data.frame(
+  student = factor(c("No", "No"), levels = levels(Default$student)),
+  balance = c(1000, 2000),
+  income = c(mean(Default$income), mean(Default$income))
+)
+
+lda.pred <- predict(lda.fit, newdata = new_data)
+
+lda_result <- data.frame(
+  balance = new_data$balance,
+  income = round(new_data$income, 2),
+  student = new_data$student,
+  P_No = round(lda.pred$posterior[, "No"], 4),
+  P_Yes = round(lda.pred$posterior[, "Yes"], 4),
+  Predicted = lda.pred$class
+)
+
+lda_result
+
+```
+
+# Ví dụ 2.5. Quadratic Discriminant Analysis (QDA)
+
+```{r qda-fit}
+qda.fit <- qda(default ~ student + balance + income, data = Default)
+qda.fit
+```
+
+```{r qda-predict}
+new_data <- data.frame(
+student = factor(c("No", "No"), levels = levels(Default$student)),
+balance = c(1000, 2000),
+income = c(mean(Default$income), mean(Default$income))
+)
+qda.pred <- predict(qda.fit, newdata = new_data)
+qda_result <- data.frame(
+balance = new_data$balance,
+income = round(new_data$income, 2),
+student = new_data$student,
+P_No = round(qda.pred$posterior[, "No"], 4),
+P_Yes = round(qda.pred$posterior[, "Yes"], 4),
+Predicted = qda.pred$class
+)
+qda_result
+```
+
+> 👉 QDA linh hoạt hơn LDA (dùng ma trận hiệp phương sai riêng cho từng
+> lớp). Có thể cho sensitivity cao hơn nhưng rủi ro overfitting hơn LDA
+> khi dữ liệu nhỏ.
+
+------------------------------------------------------------------------
+
+# Ví dụ 2.6. K-Nearest Neighbors (KNN)
+
+> Hàm `knn()` từ package `class` – bắt buộc chuẩn hóa dữ liệu trước khi
+> dùng.
+
+## Chuẩn hóa dữ liệu
+
+```{r knn-scale}
+data(Default)
+set.seed(1)
+student_num <- ifelse(Default$student == "Yes", 1, 0)
+X <- cbind(
+  balance = Default$balance,
+  income = Default$income,
+  student = student_num
+)
+
+X_scaled <- scale(X)
+
+train <- sample(1:nrow(Default), 8000)
+
+train.X <- X_scaled[train, ]
+test.X  <- X_scaled[-train, ]
+
+train.default <- Default$default[train]
+test.default  <- Default$default[-train]
+```
+
+## Dự đoán
+
+```{r knn-tune}
+set.seed(1)
+knn.pred <- knn(train.X, test.X, train.default, k = 5)
+table(knn.pred, test.default)
+mean(knn.pred == test.default)
+```
+
+> 👉 KNN là phương pháp phi tham số, linh hoạt nhưng nhạy cảm với K và
+> cần chuẩn hóa. Kết quả phụ thuộc nhiều vào phân phối dữ liệu cục bộ.
