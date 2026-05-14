@@ -1,0 +1,1042 @@
+---
+title: "Phân tích Default of Credit Card Clients"
+subtitle: "Classification"
+author: "Trần Minh Châu"
+date: "2026-04-16"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: paged
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 5,
+  fig.align  = "center"
+)
+```
+
+# 0. Thư viện
+
+```{r libraries}
+library(dplyr)
+library(corrplot)
+library(skimr)       # thống kê mô tả nhanh
+library(tidyverse)
+library(readxl)
+library(MASS)      # lda(), qda()
+library(class)     # knn()
+library(pROC)      # roc(), auc()
+library(patchwork)
+library(scales)
+library(broom)     # tidy() cho glm
+```
+
+------------------------------------------------------------------------
+
+# PHẦN 1 – KHÁM PHÁ DỮ LIỆU (EDA)
+
+------------------------------------------------------------------------
+
+# 1. Đọc & Làm sạch dữ liệu
+
+```{r load-data}
+# Dòng đầu là tên cột viết tắt (X1, X2...), dòng 2 mới là tên thật
+# Dùng skip = 1 để bỏ dòng đầu
+df_raw <- read_xls(
+  "default of credit card clients.xls",
+  skip = 1          # bỏ hàng header phụ (X1, X2, ...)
+)
+
+# Đổi tên cột target cho dễ dùng
+df <- df_raw %>%
+  rename(DEFAULT = `default payment next month`)
+
+# Xem cấu trúc
+glimpse(df)
+```
+
+```{r basic-info}
+cat("Số hàng:", nrow(df), "\n")
+cat("Số cột :", ncol(df), "\n")
+cat("\nKiểu dữ liệu từng cột:\n")
+sapply(df, class)
+```
+
+## 1.1 Kiểm tra Missing Values
+
+```{r missing}
+missing_summary <- df %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "column", values_to = "missing_count") %>%
+  mutate(missing_pct = missing_count / nrow(df) * 100)
+
+missing_summary
+```
+
+> ✔ Không có missing value – dataset hoàn chỉnh 30,000 quan sát.
+
+## 1.2 Thống kê mô tả
+
+```{r skim}
+skim(df)
+```
+
+> ⚠️ Từ thống kê mô tả cho thấy biến EDUCATION và MARRIAGE xuất hiện một
+> số giá trị không hợp lệ (như EDUCATION có các giá trị 0, 5, 6 và
+> MARRIAGE có giá trị 0), không thuộc các nhóm phân loại đã định nghĩa.
+> Do đó, cần thực hiện bước làm sạch dữ liệu bằng cách gộp các giá trị
+> bất thường vào nhóm “Others”.
+
+## 1.3 Làm sạch dữ liệu
+
+```{r clean-data}
+df <- df_raw %>%
+  rename(DEFAULT = `default payment next month`) %>%
+  mutate(
+    EDUCATION = as.numeric(as.character(EDUCATION)),
+    MARRIAGE  = as.numeric(as.character(MARRIAGE)),
+    SEX       = as.numeric(as.character(SEX)),
+    
+    EDUCATION = case_when(
+      is.na(EDUCATION) ~ 4,
+      EDUCATION %in% c(1,2,3) ~ EDUCATION,
+      TRUE ~ 4
+    ),
+    
+    MARRIAGE = case_when(
+      is.na(MARRIAGE) ~ 3,
+      MARRIAGE %in% c(1,2,3) ~ MARRIAGE,
+      TRUE ~ 3          # gộp giá trị bất hợp lệ (0, ...) vào nhóm "Others"
+    ),
+    
+    SEX = case_when(
+      SEX %in% c(1,2) ~ SEX,
+      TRUE ~ NA_real_
+    ),
+    
+    EDUCATION = factor(EDUCATION,
+                       levels = c(1,2,3,4),
+                       labels = c("Graduate", "University", "High School", "Others")),
+    
+    MARRIAGE = factor(MARRIAGE,
+                      levels = c(1,2,3),
+                      labels = c("Married", "Single", "Others")),
+    
+    SEX = factor(SEX,
+                 levels = c(1,2),
+                 labels = c("Male", "Female"))
+  )
+```
+
+```{r check-clean}
+table(df$EDUCATION)
+table(df$MARRIAGE)
+```
+
+------------------------------------------------------------------------
+
+# 2. Biến Target (DEFAULT)
+
+```{r target-analysis}
+target_summary <- df %>%
+  count(DEFAULT) %>%
+  mutate(
+    label = ifelse(DEFAULT == 1, "Default (Vỡ nợ)", "Non-Default"),
+    pct = n / sum(n),
+    pct_lab = percent(pct, accuracy = 0.1)
+  )
+
+default_pct <- target_summary %>%
+  filter(DEFAULT == 1) %>%
+  pull(pct_lab)
+
+ggplot(target_summary, aes(x = 2, y = n, fill = label)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  xlim(0.5, 2.5) +
+  geom_text(aes(label = paste0(pct_lab, "\n(", comma(n), " KH)")),
+            position = position_stack(vjust = 0.5),
+            size = 4, fontface = "bold", color = "white") +
+  annotate("text", x = 0, y = 0,
+           label = paste0(default_pct, "\nDefault"),
+           size = 6, fontface = "bold") +
+  scale_fill_manual(values = c("Default (Vỡ nợ)" = "#ef4444",
+                               "Non-Default" = "#10b981")) +
+  labs(title = "Phân bố biến Target – DEFAULT",
+       subtitle = "Tỷ lệ khách hàng vỡ nợ",
+       fill = NULL) +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(size = 11),
+        legend.position = "bottom")
+```
+
+> ⚠️ **Class Imbalance:** Tỷ lệ 78/22 – cần lưu ý khi đánh giá mô hình,
+> ưu tiên **AUC-ROC & F1** hơn Accuracy đơn thuần.
+
+------------------------------------------------------------------------
+
+# 3. Phân phối biến định lượng
+
+```{r hist-limit}
+p1 <- ggplot(df, aes(x = LIMIT_BAL)) +
+  geom_histogram(bins = 40, fill = "#3b82f6", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = median(df$LIMIT_BAL), color = "#1d4ed8",
+             linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = mean(df$LIMIT_BAL), color = "#ef4444",
+             linetype = "dashed", linewidth = 1) +
+  annotate("text", x = median(df$LIMIT_BAL) + 30000, y = 3200,
+           label = paste0("Median: ", comma(median(df$LIMIT_BAL))),
+           color = "#1d4ed8", size = 3.5, fontface = "bold") +
+  annotate("text", x = mean(df$LIMIT_BAL) + 30000, y = 2900,
+           label = paste0("Mean: ", comma(round(mean(df$LIMIT_BAL)))),
+           color = "#ef4444", size = 3.5, fontface = "bold") +
+  scale_x_continuous(labels = comma) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Phân phối LIMIT_BAL",
+    x = "Hạn mức tín dụng (NT$)", y = "Số khách hàng"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+p2 <- ggplot(df, aes(x = AGE)) +
+  geom_histogram(binwidth = 2, fill = "#6366f1", color = "white", alpha = 0.85) +
+  geom_vline(xintercept = median(df$AGE), color = "#4338ca",
+             linetype = "dashed", linewidth = 1) +
+  annotate("text", x = median(df$AGE) + 4, y = 2400,
+           label = paste0("Median: ", median(df$AGE), " tuổi"),
+           color = "#4338ca", size = 3.5, fontface = "bold") +
+  labs(
+    title    = "Phân phối AGE",
+    x = "Tuổi", y = "Số khách hàng"
+  ) +
+  scale_y_continuous(labels = comma) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+p1 + p2
+```
+
+> 📊 Phần lớn khách hàng có hạn mức tín dụng ở mức thấp đến trung bình,
+> chỉ có một số ít ở mức cao. Về độ tuổi, khách hàng chủ yếu tập trung
+> trong khoảng 30–40 tuổi và phân bố khá đồng đều.
+
+```{r boxplot-limit}
+df %>%
+  mutate(DEFAULT_label = ifelse(DEFAULT == 1, "Default", "Non-Default")) %>%
+  ggplot(aes(x = DEFAULT_label, y = LIMIT_BAL, fill = DEFAULT_label)) +
+  geom_boxplot(alpha = 0.8, outlier.alpha = 0.2, outlier.size = 0.8) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3,
+               fill = "white", color = "black") +
+  scale_fill_manual(values = c("Default" = "#ef4444", "Non-Default" = "#10b981")) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title    = "Hạn mức tín dụng theo nhóm Default",
+    subtitle = "♦ = Giá trị trung bình (mean)",
+    x = NULL, y = "Hạn mức tín dụng (NT$)",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "none")
+```
+
+> **📌** Nhóm Non-Default có median hạn mức cao hơn rõ rệt. LIMIT_BAL là
+> predictor quan trọng.
+
+------------------------------------------------------------------------
+
+# 4. Nhân khẩu học & Default Rate
+
+```{r demog-plot}
+# Hàm tính default rate theo nhóm
+# Lưu ý: hàm này dùng trước khi DEFAULT được factor hóa ở Section 8,
+# nên DEFAULT vẫn là dạng numeric (0/1) → mean() cho ra tỷ lệ trực tiếp
+default_rate <- function(data, group_var) {
+  data %>%
+    group_by({{ group_var }}) %>%
+    summarise(n = n(), rate = mean(as.numeric(as.character(DEFAULT))), .groups = "drop")
+}
+
+# dùng trực tiếp các biến đã clean
+d_sex <- default_rate(df, SEX)
+d_edu <- default_rate(df, EDUCATION)
+d_mar <- default_rate(df, MARRIAGE)
+
+# --- Plot ---
+p_sex <- ggplot(d_sex, aes(x = SEX, y = rate, fill = SEX)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = percent(rate, 0.1)), vjust = -0.4, fontface = "bold") +
+  scale_fill_manual(values = c("#3b82f6","#f472b6")) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.32)) +
+  labs(title = "Theo Giới tính", x = NULL, y = "Default Rate") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+
+p_edu <- ggplot(d_edu, aes(x = EDUCATION, y = rate, fill = rate)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = percent(rate, 0.1)), vjust = -0.4, fontface = "bold") +
+  scale_fill_gradient(low = "#86efac", high = "#ef4444") +
+  scale_y_continuous(labels = percent, limits = c(0, 0.32)) +
+  labs(title = "Theo Học vấn", x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+
+p_mar <- ggplot(d_mar, aes(x = MARRIAGE, y = rate, fill = rate)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = percent(rate, 0.1)), vjust = -0.4, fontface = "bold") +
+  scale_fill_gradient(low = "#86efac", high = "#ef4444") +
+  scale_y_continuous(labels = percent, limits = c(0, 0.32)) +
+  labs(title = "Theo Hôn nhân", x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"))
+
+p_sex + p_edu + p_mar +
+  plot_annotation(title = "Default Rate theo đặc điểm Nhân khẩu học",
+                  theme = theme(plot.title = element_text(face = "bold", size = 13)))
+```
+
+> **📌** Tỷ lệ vỡ nợ có sự khác biệt giữa các nhóm nhân khẩu học. Cụ
+> thể, nam có tỷ lệ vỡ nợ cao hơn nữ; nhóm học vấn thấp (High School) có
+> tỷ lệ cao hơn so với các nhóm còn lại; và nhóm “Others” trong tình
+> trạng hôn nhân có tỷ lệ vỡ nợ cao nhất.
+
+```{r age-group-plot}
+df %>%
+  mutate(AGE_GROUP = cut(AGE, breaks = c(20,30,40,50,60,80),
+                         labels = c("21-30","31-40","41-50","51-60","61+"))) %>%
+  group_by(AGE_GROUP) %>%
+  summarise(rate = mean(DEFAULT), n = n(), .groups = "drop") %>%
+  ggplot(aes(x = AGE_GROUP, y = rate)) +
+  geom_col(aes(fill = rate), width = 0.55, show.legend = FALSE) +
+  geom_line(aes(group = 1), color = "#1d4ed8", linewidth = 1.2) +
+  geom_point(size = 3.5, color = "#1d4ed8") +
+  geom_text(aes(label = percent(rate, 0.1)), vjust = -0.8, fontface = "bold") +
+  scale_fill_gradient(low = "#fde68a", high = "#ef4444") +
+  scale_y_continuous(labels = percent, limits = c(0, 0.32)) +
+  labs(title = "Default Rate theo Nhóm Tuổi",
+       x = "Nhóm tuổi", y = "Default Rate") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+> **📌** Nhóm 31–40 tuổi có tỷ lệ vỡ nợ thấp nhất. Từ sau đó, tỷ lệ vỡ
+> nợ tăng dần theo độ tuổi và cao nhất ở nhóm lớn tuổi.
+
+------------------------------------------------------------------------
+
+# 5. Lịch sử Thanh toán (PAY)
+
+```{r pay0-rate}
+df %>%
+  mutate(PAY_0_cat = case_when(
+    PAY_0 <= -2 ~ "-2: Không dùng",
+    PAY_0 == -1 ~ "-1: Đúng hạn",
+    PAY_0 ==  0 ~ " 0: Revolving",
+    PAY_0 ==  1 ~ " 1: Trễ 1 tháng",
+    PAY_0 ==  2 ~ " 2: Trễ 2 tháng",
+    PAY_0 ==  3 ~ " 3: Trễ 3 tháng",
+    TRUE         ~ " 4+: Trễ nặng"
+  )) %>%
+  group_by(PAY_0_cat) %>%
+  summarise(rate = mean(DEFAULT), n = n(), .groups = "drop") %>%
+  ggplot(aes(x = reorder(PAY_0_cat, rate), y = rate, fill = rate)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = percent(rate, 1)), hjust = -0.1,
+            fontface = "bold", size = 3.8) +
+  scale_fill_gradient2(low = "#10b981", mid = "#f59e0b", high = "#ef4444",
+                       midpoint = 0.4) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.95)) +
+  coord_flip() +
+  labs(title = "Default Rate theo trạng thái PAY_0 (Tháng 9/2005)",
+       x = NULL, y = "Default Rate") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+> **📌** Tỷ lệ vỡ nợ tăng mạnh theo mức độ trễ thanh toán. Khách hàng
+> trễ từ 2–3 tháng trở lên có xác suất vỡ nợ rất cao, cho thấy lịch sử
+> thanh toán (PAY_0) là một trong những biến dự đoán quan trọng nhất.
+
+```{r pay-corr-bar}
+pay_cols <- c("PAY_0","PAY_2","PAY_3","PAY_4","PAY_5","PAY_6")
+tibble(
+  Feature = pay_cols,
+  Thang   = c("T9","T8","T7","T6","T5","T4"),
+  Corr    = map_dbl(pay_cols, ~cor(df[[.x]], df$DEFAULT))
+) %>%
+  ggplot(aes(x = reorder(Thang, -Corr), y = Corr, fill = Corr)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = round(Corr, 3)), vjust = -0.4, fontface = "bold") +
+  scale_fill_gradient(low = "#fde68a", high = "#ef4444") +
+  scale_y_continuous(limits = c(0, 0.38)) +
+  labs(title = "Pearson Correlation – PAY features vs DEFAULT",
+       x = "Tháng", y = "Pearson r") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+> **📌** Thông tin gần đây quan trọng hơn thông tin xa.
+
+------------------------------------------------------------------------
+
+# 6. So sánh BILL_AMT & PAY_AMT theo nhóm Default
+
+```{r financial-compare}
+df_fin <- df %>%
+  mutate(
+    DEFAULT_label = case_when(
+      DEFAULT %in% c(0, "0", "No", "Non-Default") ~ "Non-Default",
+      DEFAULT %in% c(1, "1", "Yes", "Default") ~ "Default",
+      TRUE ~ NA_character_
+    ),
+    DEFAULT_label = factor(DEFAULT_label, levels = c("Non-Default", "Default"))
+  )
+
+months <- c("T9", "T8", "T7", "T6", "T5", "T4")
+
+# BILL_AMT
+bill_mean <- df_fin %>%
+  dplyr::select(DEFAULT_label, starts_with("BILL_AMT")) %>%
+  pivot_longer(-DEFAULT_label, names_to = "var", values_to = "val") %>%
+  mutate(
+    month_id = as.integer(str_extract(var, "\\d+")),
+    Thang = months[month_id]
+  ) %>%
+  group_by(Thang, DEFAULT_label) %>%
+  summarise(mean_val = mean(val, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Thang = factor(Thang, levels = months))
+
+p_bill <- ggplot(bill_mean, aes(x = Thang, y = mean_val,
+                                color = DEFAULT_label, group = DEFAULT_label)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("Non-Default" = "#10b981",
+                                "Default" = "#ef4444")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Trung bình BILL_AMT", x = NULL, y = "NT$", color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "top")
+
+# PAY_AMT
+pay_mean <- df_fin %>%
+  dplyr::select(DEFAULT_label, starts_with("PAY_AMT")) %>%
+  pivot_longer(-DEFAULT_label, names_to = "var", values_to = "val") %>%
+  mutate(
+    month_id = as.integer(str_extract(var, "\\d+")),
+    Thang = months[month_id]
+  ) %>%
+  group_by(Thang, DEFAULT_label) %>%
+  summarise(mean_val = mean(val, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Thang = factor(Thang, levels = months))
+
+p_pay <- ggplot(pay_mean, aes(x = Thang, y = mean_val,
+                              color = DEFAULT_label, group = DEFAULT_label)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("Non-Default" = "#10b981",
+                                "Default" = "#ef4444")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Trung bình PAY_AMT", x = NULL, y = "NT$", color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "top")
+
+p_bill + p_pay +
+  plot_annotation(
+    title = "So sánh Hóa đơn & Thanh toán – Default vs Non-Default",
+    theme = theme(plot.title = element_text(face = "bold", size = 13))
+  )
+```
+
+> **📌** Hai nhóm nợ gần giống nhau, nhưng khách hàng không vỡ nợ trả
+> tiền nhiều hơn.
+
+------------------------------------------------------------------------
+
+# 7. Ma trận Tương quan
+
+```{r corr-all}
+num_vars <- df[sapply(df, is.numeric)]
+num_vars <- num_vars[, colSums(!is.na(num_vars)) > 2]
+
+# bỏ biến không thay đổi giá trị
+num_vars <- num_vars[, sapply(num_vars, function(x) sd(x, na.rm = TRUE) > 0)]
+
+corr_mat <- cor(num_vars, use = "pairwise.complete.obs")
+corr_mat[is.na(corr_mat)] <- 0
+
+corrplot(
+  corr_mat,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  addCoef.col = "black",
+  number.cex = 0.35,
+  tl.col = "black",
+  tl.srt = 45,
+  tl.cex = 0.45,
+  col = colorRampPalette(c("#3b82f6", "white", "#ef4444"))(200),
+  diag = FALSE,
+  cl.cex = 0.7,
+  title = "Heatmap tương quan các biến",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+> **📌 Hiện tượng đa cộng tuyến:** Các biến BILL_AMT có tương quan cao
+> (≈0.8,0.96) – tạo biến AVG_BILL để đại diện và loại các biến BILL_AMT
+> riêng lẻ.
+
+```{r AVG_BILL}
+df$AVG_BILL <- rowMeans(df[, c("BILL_AMT1","BILL_AMT2","BILL_AMT3",
+                              "BILL_AMT4","BILL_AMT5","BILL_AMT6")])
+```
+
+> 👉 Tóm lại, features có khả năng dự báo cao bao gồm nhóm lịch sử thanh
+> toán (PAY), biến tổng hợp dư nợ (AVG_BILL), khả năng chi trả
+> (PAY_AMT), hạn mức tín dụng (LIMIT_BAL) và các đặc điểm nhân khẩu học.
+
+# PHẦN 2 – XÂY DỰNG MÔ HÌNH
+
+------------------------------------------------------------------------
+
+# 8. Chuẩn bị dữ liệu cho Modeling
+
+## 8.1 Chọn features & Train/Test Split
+
+```{r model-prep}
+# Feature set đã chọn
+# - PAY_0–PAY_6: lịch sử thanh toán (predictor quan trọng nhất từ EDA)
+# - LIMIT_BAL: hạn mức tín dụng
+# - PAY_AMT1–3: 3 tháng gần nhất có tương quan cao hơn với DEFAULT;
+#   PAY_AMT4–6 tương quan thấp hơn và có đa cộng tuyến với 3 biến trên → loại
+# - AVG_BILL: tổng hợp thay thế BILL_AMT1–6 (đã xử lý multicollinearity ở Section 7)
+# - Nhân khẩu học: AGE, EDUCATION, MARRIAGE, SEX
+top_features <- c(
+  "PAY_0","PAY_2","PAY_3","PAY_4","PAY_5","PAY_6",
+  "LIMIT_BAL",
+  "PAY_AMT1","PAY_AMT2","PAY_AMT3",
+  "AVG_BILL",
+  "AGE","EDUCATION","MARRIAGE","SEX"
+)
+
+# Chuẩn bị dữ liệu model
+df_model <- df %>%
+  dplyr::select(all_of(top_features), DEFAULT) %>%
+  mutate(
+    DEFAULT = factor(DEFAULT, levels = c(0,1), labels = c("No","Yes"))
+  )
+
+# Train/Test split 80/20
+set.seed(1)
+train_idx <- sample(nrow(df_model), floor(0.8 * nrow(df_model)))
+
+train_df <- df_model[train_idx, ]
+test_df  <- df_model[-train_idx, ]
+
+cat("Train set:", nrow(train_df), "quan sát\n")
+cat("Test set:", nrow(test_df), "quan sát\n")
+```
+
+## 8.2 Chuẩn hóa (cho KNN)
+
+```{r scale-for-knn}
+X_train <- train_df %>%
+  dplyr::select(-DEFAULT) %>%
+  dplyr::select(where(is.numeric))
+
+X_test <- test_df %>%
+  dplyr::select(-DEFAULT) %>%
+  dplyr::select(dplyr::all_of(names(X_train)))
+
+X_train_sc <- scale(X_train)
+
+X_test_sc <- scale(
+  X_test,
+  center = attr(X_train_sc, "scaled:center"),
+  scale  = attr(X_train_sc, "scaled:scale")
+)
+
+train_labels <- train_df$DEFAULT
+test_labels  <- test_df$DEFAULT
+```
+
+------------------------------------------------------------------------
+
+# 9. Logistic Regression
+
+> Dùng hàm `glm()` với `family = binomial`
+
+## 9.1 Fit mô hình
+
+```{r glm-fit}
+glm.fit <- glm(DEFAULT ~ .,
+               data   = train_df,
+               family = binomial)
+
+summary(glm.fit)
+```
+
+## 9.2 Dự đoán xác suất
+
+```{r glm-pred}
+# type = "response" trả về P(Y=1|X) – xác suất default
+glm.probs <- predict(glm.fit, newdata = test_df, type = "response")
+
+# Xem vài giá trị đầu
+head(glm.probs, 10)
+```
+
+## 9.3 Chuyển xác suất → nhãn (ngưỡng 0.5)
+
+```{r glm-class}
+# Tạo vector "No" rồi gán "Yes" nếu prob >= 0.5
+glm.pred <- rep("No", nrow(test_df))
+glm.pred[glm.probs >= 0.5] <- "Yes"
+glm.pred <- factor(glm.pred, levels = c("No","Yes"))
+```
+
+## 9.4 Confusion Matrix & Metrics
+
+```{r glm-cm}
+# Confusion Matrix
+cm_glm <- table(Predicted = glm.pred, Actual = test_labels)
+cm_glm
+
+# Test error rate
+cat("\nTest Error Rate (LR)  :", round(mean(glm.pred != test_labels), 4), "\n")
+cat("Test Accuracy  (LR)  :", round(mean(glm.pred == test_labels),  4), "\n")
+```
+
+```{r glm-metrics}
+# Tính chi tiết metrics
+tp  <- cm_glm["Yes","Yes"]; tn <- cm_glm["No","No"]
+fp  <- cm_glm["Yes","No"];  fn <- cm_glm["No","Yes"]
+sens_glm  <- tp / (tp + fn)
+spec_glm  <- tn / (tn + fp)
+prec_glm  <- tp / (tp + fp)
+f1_glm    <- 2 * prec_glm * sens_glm / (prec_glm + sens_glm)
+roc_glm   <- roc(test_labels, glm.probs, levels = c("No","Yes"), quiet = TRUE)
+auc_glm   <- as.numeric(auc(roc_glm))
+
+cat("Sensitivity (Recall)  :", round(sens_glm, 4), "\n")
+cat("Specificity           :", round(spec_glm, 4), "\n")
+cat("Precision             :", round(prec_glm, 4), "\n")
+cat("F1-Score              :", round(f1_glm,   4), "\n")
+cat("AUC-ROC               :", round(auc_glm,  4), "\n")
+```
+
+> 👉 **Logistic Regression** đạt Accuracy = 0.8058 nhưng Recall thấp
+> (0.2258), cho thấy mô hình bỏ sót nhiều khách hàng vỡ nợ. Specificity
+> cao phần lớn do dữ liệu lệch về nhóm không vỡ nợ, khiến mô hình bị
+> bias về nhóm “an toàn”. Có thể giảm bias bằng cross-validation, SMOTE
+> hoặc bootstrap, nhưng bài này chỉ dừng ở việc ghi nhận hạn chế và chưa
+> triển khai các kỹ thuật này.
+
+## 9.5 Odds Ratio
+
+```{r glm-or}
+tidy(glm.fit) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(OR       = exp(estimate),
+         lower_ci = exp(estimate - 1.96 * std.error),
+         upper_ci = exp(estimate + 1.96 * std.error),
+         sig      = ifelse(p.value < 0.05, "p < 0.05", "p ≥ 0.05")) %>%
+  arrange(desc(OR)) %>%
+  ggplot(aes(x = reorder(term, OR), y = OR, color = sig)) +
+  geom_point(size = 3.5) +
+  geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.3) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray50") +
+  scale_color_manual(values = c("p < 0.05" = "#ef4444",
+                                "p ≥ 0.05" = "#94a3b8")) +
+  coord_flip() +
+  labs(title    = "Odds Ratio – Logistic Regression (95% CI)",
+       subtitle = "OR > 1: tăng nguy cơ | OR < 1: giảm nguy cơ",
+       x = NULL, y = "Odds Ratio", color = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top")
+```
+
+> 👉 Ưu điểm của Logistic Regression là kết quả dễ diễn giải thông qua
+> Odds Ratio. Từ biểu đồ, có thể thấy **PAY_0 là yếu tố nổi bật nhất**,
+> khi tình trạng trả nợ gần nhất xấu hơn thì nguy cơ vỡ nợ tăng rõ rệt.
+> Các biến còn lại có tác động nhỏ hơn, trong đó nhiều biến tài chính có
+> OR gần 1 nên không nổi bật bằng nhóm biến lịch sử thanh toán.
+
+------------------------------------------------------------------------
+
+# 10. Linear Discriminant Analysis (LDA)
+
+> Dùng hàm `lda()` từ package `MASS`
+
+## 10.1 Fit mô hình
+
+```{r lda-fit}
+lda.fit <- lda(DEFAULT ~ ., data = train_df)
+
+lda.fit         # in prior, group means, coefficients
+```
+
+> **📌** - **Prior probabilities**: P(Y=0) và P(Y=1) ước lượng từ train
+> set. - **Group means**: trung bình mỗi feature theo từng lớp – feature
+> nào chênh lệch lớn thì phân biệt tốt. - **Coefficients of linear
+> discriminants**: hệ số tạo nên hàm phân biệt LD1. Dấu và độ lớn cho
+> biết chiều và mức độ đóng góp.
+
+## 10.2 Vẽ Discriminant Plot
+
+```{r lda-plot}
+lda.pred.train <- predict(lda.fit, train_df)
+
+# LD1 scores theo từng lớp
+lda_df <- tibble(
+  LD1     = lda.pred.train$x[, 1],
+  DEFAULT = train_df$DEFAULT
+)
+
+ggplot(lda_df, aes(x = LD1, fill = DEFAULT)) +
+  geom_histogram(bins = 60, alpha = 0.7, position = "identity") +
+  scale_fill_manual(values = c("No" = "#10b981", "Yes" = "#ef4444")) +
+  labs(title    = "LDA – Phân phối LD1 Score theo lớp (Train set)",
+       subtitle = "Hai phân phối càng tách xa nhau → LDA phân biệt càng tốt",
+       x = "Linear Discriminant 1 (LD1)", y = "Số quan sát", fill = "DEFAULT") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top")
+```
+
+> 👉 Phân phối LD1 cho thấy nhóm vỡ nợ có xu hướng nằm lệch sang phải so
+> với nhóm không vỡ nợ, chứng tỏ LDA có khả năng phân biệt hai lớp ở mức
+> nhất định. Tuy nhiên, hai nhóm vẫn chồng lấn đáng kể quanh vùng trung
+> tâm, nên khả năng tách lớp chưa thật sự rõ ràng.
+
+## 10.3 Dự đoán & Đánh giá
+
+```{r lda-pred}
+# predict.lda() trả về list gồm $class, $posterior, $x
+lda.pred <- predict(lda.fit, newdata = test_df)
+
+# Nhãn dự đoán
+lda.class <- lda.pred$class
+
+# Confusion Matrix
+cm_lda <- table(Predicted = lda.class, Actual = test_labels)
+cm_lda
+
+cat("\nTest Error Rate (LDA):", round(mean(lda.class != test_labels), 4), "\n")
+cat("Test Accuracy   (LDA):", round(mean(lda.class == test_labels),  4), "\n")
+```
+
+```{r lda-metrics}
+tp  <- cm_lda["Yes","Yes"]; tn <- cm_lda["No","No"]
+fp  <- cm_lda["Yes","No"];  fn <- cm_lda["No","Yes"]
+sens_lda  <- tp / (tp + fn)
+spec_lda  <- tn / (tn + fp)
+prec_lda  <- tp / (tp + fp)
+f1_lda    <- 2 * prec_lda * sens_lda / (prec_lda + sens_lda)
+roc_lda   <- roc(test_labels, lda.pred$posterior[,"Yes"],
+                 levels = c("No","Yes"), quiet = TRUE)
+auc_lda   <- as.numeric(auc(roc_lda))
+
+cat("Sensitivity :", round(sens_lda, 4), "\n")
+cat("Specificity :", round(spec_lda, 4), "\n")
+cat("Precision   :", round(prec_lda, 4), "\n")
+cat("F1-Score    :", round(f1_lda,   4), "\n")
+cat("AUC-ROC     :", round(auc_lda,  4), "\n")
+```
+
+> 👉 Tương tự Logistic Regression, LDA là mô hình dễ diễn giải và cho
+> thấy khả năng phân biệt hai nhóm thông qua **LD1 score**. Mô hình đạt
+> accuracy khá tốt (**80.73%**) và đặc biệt dự đoán tốt nhóm không vỡ nợ
+> (**specificity = 97.39%**). Tuy nhiên, sensitivity thấp (**24.12%**)
+> cho thấy LDA bỏ sót nhiều khách hàng thực sự vỡ nợ. Vì vậy, LDA có thể
+> dùng để nhận diện xu hướng tổng quát, nhưng chưa đủ mạnh nếu mục tiêu
+> chính là phát hiện khách hàng rủi ro.
+
+------------------------------------------------------------------------
+
+# 11. Quadratic Discriminant Analysis (QDA)
+
+> Dùng hàm `qda()` từ package `MASS`
+
+## 11.1 Fit mô hình
+
+```{r qda-fit}
+qda.fit <- qda(DEFAULT ~ ., data = train_df)
+
+qda.fit
+```
+
+> **📌 LDA vs QDA :** - LDA giả định $\Sigma_k = \Sigma$ (ma trận hiệp
+> phương sai bằng nhau giữa các lớp) → ranh giới **tuyến tính**. - QDA
+> cho phép $\Sigma_k$ khác nhau → ranh giới **bậc hai (quadratic)**. -
+> QDA linh hoạt hơn nhưng cần ước lượng nhiều tham số hơn → cần nhiều dữ
+> liệu.
+
+## 11.2 Dự đoán & Đánh giá
+
+```{r qda-pred}
+qda.pred <- predict(qda.fit, newdata = test_df)
+
+qda.class <- qda.pred$class
+
+cm_qda <- table(Predicted = qda.class, Actual = test_labels)
+cm_qda
+
+cat("\nTest Error Rate (QDA):", round(mean(qda.class != test_labels), 4), "\n")
+cat("Test Accuracy   (QDA):", round(mean(qda.class == test_labels),  4), "\n")
+```
+
+```{r qda-metrics}
+tp  <- cm_qda["Yes","Yes"]; tn <- cm_qda["No","No"]
+fp  <- cm_qda["Yes","No"];  fn <- cm_qda["No","Yes"]
+sens_qda  <- tp / (tp + fn)
+spec_qda  <- tn / (tn + fp)
+prec_qda  <- tp / (tp + fp)
+f1_qda    <- 2 * prec_qda * sens_qda / (prec_qda + sens_qda)
+roc_qda   <- roc(test_labels, qda.pred$posterior[,"Yes"],
+                 levels = c("No","Yes"), quiet = TRUE)
+auc_qda   <- as.numeric(auc(roc_qda))
+
+cat("Sensitivity :", round(sens_qda, 4), "\n")
+cat("Specificity :", round(spec_qda, 4), "\n")
+cat("Precision   :", round(prec_qda, 4), "\n")
+cat("F1-Score    :", round(f1_qda,   4), "\n")
+cat("AUC-ROC     :", round(auc_qda,  4), "\n")
+```
+
+> 👉 QDA có **accuracy = 63.5%**, thấp hơn Logistic Regression và LDA,
+> nhưng lại phát hiện nhóm vỡ nợ tốt hơn với **sensitivity = 69.94%**.
+> Điều này cho thấy có sự **trade-off**: QDA bắt được nhiều khách hàng
+> rủi ro hơn, nhưng đồng thời dự đoán nhầm nhiều khách hàng không vỡ nợ
+> thành vỡ nợ, thể hiện qua **specificity = 61.6%** và **precision =
+> 34.89%**. Vì vậy, QDA phù hợp nếu ưu tiên phát hiện rủi ro, nhưng kém
+> hơn về độ chính xác tổng thể .
+
+------------------------------------------------------------------------
+
+# 12. K-Nearest Neighbors (KNN)
+
+> Dùng hàm `knn()` từ package `class`\
+> **Lưu ý bắt buộc:** `knn()` yêu cầu dữ liệu đã được **chuẩn hóa**
+
+## 12.1 Tìm K tối ưu
+
+```{r knn-tune}
+set.seed(1)
+
+k_values <- c(1, 3, 5, 7, 9, 11, 15, 21, 31, 41, 51, 71, 101)
+error_k  <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  knn.pred     <- knn(train = X_train_sc,
+                      test  = X_test_sc,
+                      cl    = train_labels,
+                      k     = k_values[i])
+  error_k[i]   <- mean(knn.pred != test_labels)
+}
+
+k_df <- tibble(K = k_values, ErrorRate = error_k)
+print(k_df)
+
+best_k <- k_values[which.min(error_k)]
+cat("\nK tối ưu:", best_k, "| Error Rate:", round(min(error_k), 4), "\n")
+```
+
+> 👉 Với mô hình KNN, ta thử nhiều giá trị khác nhau của K và so sánh
+> sai số phân loại tương ứng. Sau đó, ta chọn giá trị K cho sai số nhỏ
+> nhất để xây dựng mô hình cuối cùng. Việc thử nhiều giá trị K là cần
+> thiết vì nếu K quá nhỏ thì mô hình dễ bị nhiễu, còn nếu K quá lớn thì
+> mô hình có thể phân loại kém linh hoạt.
+
+```{r knn-tune-plot}
+ggplot(k_df, aes(x = K, y = ErrorRate)) +
+  geom_line(color = "#3b82f6", linewidth = 1.2) +
+  geom_point(size = 3.5, color = "#3b82f6") +
+  geom_point(data = k_df %>% filter(K == best_k),
+             color = "#ef4444", size = 5) +
+  geom_text(data = k_df %>% filter(K == best_k),
+            aes(label = paste0("K=", K, "\nError=", round(ErrorRate, 3))),
+            vjust = -1, color = "#ef4444", fontface = "bold", size = 3.5) +
+  scale_x_continuous(breaks = k_values) +
+  labs(title    = "KNN – Test Error Rate theo K",
+       subtitle = "Điểm đỏ = K tối ưu (error thấp nhất)",
+       x = "K (số láng giềng)", y = "Test Error Rate") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## 12.2 Fit với K tối ưu & Đánh giá
+
+```{r knn-pred}
+set.seed(1)
+
+knn.pred <- knn(train = X_train_sc,
+                test  = X_test_sc,
+                cl    = train_labels,
+                k     = best_k,
+                prob  = TRUE)
+
+cm_knn <- table(Predicted = knn.pred, Actual = test_labels)
+cm_knn
+
+cat("\nTest Error Rate (KNN, K =", best_k, "):",
+    round(mean(knn.pred != test_labels), 4), "\n")
+cat("Test Accuracy   (KNN, K =", best_k, "):",
+    round(mean(knn.pred == test_labels),  4), "\n")
+```
+
+```{r knn-metrics}
+tp  <- cm_knn["Yes","Yes"]; tn <- cm_knn["No","No"]
+fp  <- cm_knn["Yes","No"];  fn <- cm_knn["No","Yes"]
+sens_knn <- tp / (tp + fn)
+spec_knn <- tn / (tn + fp)
+prec_knn <- tp / (tp + fp)
+f1_knn   <- 2 * prec_knn * sens_knn / (prec_knn + sens_knn)
+
+# Lấy xác suất lớp "Yes" cho ROC
+prob_knn_raw <- attr(knn.pred, "prob")
+prob_knn     <- ifelse(knn.pred == "Yes", prob_knn_raw, 1 - prob_knn_raw)
+roc_knn      <- roc(test_labels, prob_knn, levels = c("No","Yes"), quiet = TRUE)
+auc_knn      <- as.numeric(auc(roc_knn))
+
+cat("Sensitivity :", round(sens_knn, 4), "\n")
+cat("Specificity :", round(spec_knn, 4), "\n")
+cat("Precision   :", round(prec_knn, 4), "\n")
+cat("F1-Score    :", round(f1_knn,   4), "\n")
+cat("AUC-ROC     :", round(auc_knn,  4), "\n")
+```
+
+> 👉 KNN với **K = 41** cho kết quả khá tốt và đặc biệt mạnh trong việc
+> nhận diện nhóm không vỡ nợ với **specificity = 95.21%**, đồng thời có
+> **sensitivity = 34.31%**, cải thiện so với LDA. So với QDA, KNN cho
+> kết quả ổn định hơn và cân bằng hơn giữa độ chính xác tổng thể và khả
+> năng phân biệt hai lớp. Tuy nhiên, cần lưu ý rằng K được chọn trực
+> tiếp trên test set – để khách quan hơn, thực tế nên dùng **k-fold
+> cross-validation** trên train set để tránh leakage.
+
+------------------------------------------------------------------------
+
+# 13. So sánh tổng hợp các mô hình
+
+## 13.1 Bảng Metrics
+
+```{r compare-table}
+results <- tibble(
+  Model       = c("Logistic Regression", "LDA", "QDA",
+                  paste0("KNN (K=", best_k, ")")),
+  Accuracy    = round(c(mean(glm.pred  == test_labels),
+                        mean(lda.class == test_labels),
+                        mean(qda.class == test_labels),
+                        mean(knn.pred  == test_labels)), 4),
+  Sensitivity = round(c(sens_glm, sens_lda, sens_qda, sens_knn), 4),
+  Specificity = round(c(spec_glm, spec_lda, spec_qda, spec_knn), 4),
+  Precision   = round(c(prec_glm, prec_lda, prec_qda, prec_knn), 4),
+  F1_Score    = round(c(f1_glm,   f1_lda,   f1_qda,   f1_knn),   4),
+  AUC_ROC     = round(c(auc_glm,  auc_lda,  auc_qda,  auc_knn),  4)
+)
+
+results
+```
+
+## 13.2 ROC Curve – 4 mô hình
+
+```{r roc-compare}
+roc_df <- bind_rows(
+  tibble(Model = paste0("Logistic (AUC=",round(auc_glm,3),")"),
+         FPR = 1-roc_glm$specificities, TPR = roc_glm$sensitivities),
+  tibble(Model = paste0("LDA (AUC=",     round(auc_lda,3),")"),
+         FPR = 1-roc_lda$specificities,  TPR = roc_lda$sensitivities),
+  tibble(Model = paste0("QDA (AUC=",     round(auc_qda,3),")"),
+         FPR = 1-roc_qda$specificities,  TPR = roc_qda$sensitivities),
+  tibble(Model = paste0("KNN (AUC=",     round(auc_knn,3),")"),
+         FPR = 1-roc_knn$specificities,  TPR = roc_knn$sensitivities)
+)
+
+ggplot(roc_df, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(linewidth = 1.1) +
+  geom_abline(linetype = "dashed", color = "gray60") +
+  scale_color_manual(values = c("#3b82f6","#10b981","#f59e0b","#ef4444")) +
+  scale_x_continuous(labels = percent) +
+  scale_y_continuous(labels = percent) +
+  labs(title    = "ROC Curve – So sánh 4 mô hình",
+       subtitle = "Đường chéo = random classifier | Càng xa càng tốt",
+       x = "False Positive Rate (1 – Specificity)",
+       y = "True Positive Rate (Sensitivity)",
+       color = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title      = element_text(face = "bold"),
+        legend.position = c(0.65, 0.25),
+        legend.background = element_rect(fill = "white", color = "gray90"))
+```
+
+> 👉 Đường ROC cho thấy cả 4 mô hình đều tốt hơn dự đoán ngẫu nhiên.
+> Trong đó, KNN có AUC cao nhất (0,755) nên mô hình này có khả năng phân
+> biệt hai lớp tốt nhất.
+
+## 13.3 Biểu đồ so sánh metrics
+
+```{r compare-bar}
+results %>%
+  pivot_longer(-Model, names_to = "Metric", values_to = "Value") %>%
+  mutate(Metric = factor(Metric,
+    levels = c("Accuracy","Sensitivity","Specificity","Precision","F1_Score","AUC_ROC"))) %>%
+  ggplot(aes(x = Model, y = Value, fill = Model)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = round(Value, 3)), vjust = -0.4, size = 2.8, fontface = "bold") +
+  facet_wrap(~Metric, ncol = 3) +
+  scale_fill_manual(values = c("#3b82f6","#10b981","#f59e0b","#ef4444")) +
+  scale_y_continuous(limits = c(0, 1.05)) +
+  labs(title = "So sánh tất cả Metrics – 4 mô hình (Test Set)",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(plot.title  = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        strip.text  = element_text(face = "bold"))
+```
+
+------------------------------------------------------------------------
+
+# 14. Kết luận
+
+```{r conclusion}
+best_auc <- results %>% slice_max(AUC_ROC, n = 1)
+best_f1  <- results %>% slice_max(F1_Score, n = 1)
+
+cat("🏆 Best AUC-ROC :", best_auc$Model, "–", best_auc$AUC_ROC, "\n")
+cat("🎯 Best F1-Score:", best_f1$Model,  "–", best_f1$F1_Score,  "\n")
+```
+
+> ## 📋 Tổng kết
+>
+> | Mô hình | Hàm R | Đặc điểm |
+> |------------------------|------------------------|------------------------|
+> | **Logistic Regression** | `glm(..., family=binomial)` | Dễ giải thích qua Odds Ratio; kết quả ổn định, specificity cao |
+> | **LDA** | `MASS::lda()` | Ranh giới tuyến tính; accuracy tốt, nhận diện tốt nhóm không vỡ nợ |
+> | **QDA** | `MASS::qda()` | Linh hoạt hơn LDA; sensitivity và F1-score cao nhất |
+> | **KNN** | `class::knn()` | Không tham số, cần chuẩn hóa dữ liệu; AUC-ROC cao nhất, khả năng phân biệt hai lớp tốt theo tiêu chí AUC. |
+>
+> **💡** Nhìn chung, việc lựa chọn mô hình không nên chỉ dựa hoàn toàn
+> vào các chỉ số đánh giá. Với bài toán tín dụng, Logistic Regression
+> vẫn là một lựa chọn rất phù hợp vì kết quả của mô hình khá ổn định,
+> đồng thời dễ giải thích thông qua Odds Ratio. Điều này giúp người ra
+> quyết định hiểu được yếu tố nào làm tăng hoặc giảm rủi ro vỡ nợ của
+> khách hàng.
+>
+> Do đó, trong bài toán dự đoán vỡ nợ thẻ tín dụng, Logistic Regression
+> được lựa chọn là mô hình phù hợp nhất.
